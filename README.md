@@ -35,7 +35,7 @@ XianyuAutoAgent 是一个为闲鱼平台打造的AI智能客服自动化系统�
 ### 快速开始
 ```bash
 # 克隆仓库
-git clone https://github.com/your-username/XianyuAutoAgent.git
+git clone https://github.com/liwi-sys/XianyuAutoAgent.git
 cd XianyuAutoAgent
 
 # 安装依赖

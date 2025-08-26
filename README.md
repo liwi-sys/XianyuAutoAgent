@@ -209,6 +209,7 @@ pytest tests/ --cov=. --cov-report=html
 - **Qwen (通义千问)**: 提供强大的大语言模型能力
 - **Xianyu (闲鱼)**: 启发此自动化系统的平台
 - **OpenAI**: 提供兼容的API接口
+- **XianYuAutoAgent**: 参考了 https://github.com/shaxiu/XianyuAutoAgent
 
 ## 📞 技术支持
 

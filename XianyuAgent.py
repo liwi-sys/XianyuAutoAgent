@@ -46,12 +46,12 @@ class XianyuReplyBot:
         """初始化各领域Agent"""
         self.agents = {
             "classify": ClassifyAgent(
-                self.client, self.classify_prompt, self._safe_filter
+                self.client, self.classify_prompt, self._safe_filter, self.config_manager
             ),
-            "price": PriceAgent(self.client, self.price_prompt, self._safe_filter),
-            "tech": TechAgent(self.client, self.tech_prompt, self._safe_filter),
+            "price": PriceAgent(self.client, self.price_prompt, self._safe_filter, self.config_manager),
+            "tech": TechAgent(self.client, self.tech_prompt, self._safe_filter, self.config_manager),
             "default": DefaultAgent(
-                self.client, self.default_prompt, self._safe_filter
+                self.client, self.default_prompt, self._safe_filter, self.config_manager
             ),
         }
 
@@ -237,10 +237,11 @@ class IntentRouter:
 class BaseAgent:
     """Agent基类"""
 
-    def __init__(self, client, system_prompt, safety_filter):
+    def __init__(self, client, system_prompt, safety_filter, config_manager=None):
         self.client = client
         self.system_prompt = system_prompt
         self.safety_filter = safety_filter
+        self.config_manager = config_manager
 
     def generate(
         self, user_msg: str, item_desc: str, context: str, bargain_count: int = 0

@@ -30,20 +30,38 @@ class MessageBatch:
 class MessageBatcher:
     """消息批处理器 - 实现消息缓冲和批处理"""
     
-    def __init__(self, config_manager):
+    def __init__(self, config_manager, message_processor=None, websocket_manager=None):
         self.config_manager = config_manager
+        self.message_processor = message_processor
+        self.websocket_manager = websocket_manager
         self.batches: Dict[str, MessageBatch] = {}
         self.processing_tasks: Dict[str, asyncio.Task] = {}
         self.lock = asyncio.Lock()
         
         # 获取配置
-        self.batching_config = config_manager.get_message_batching_config()
+        self._reload_config()
+        
+        logger.info(f"消息批处理器初始化完成: enabled={self.enabled}, max_batch_size={self.max_batch_size}, max_wait_time_ms={self.max_wait_time_ms}")
+    
+    def _reload_config(self):
+        """重新加载配置"""
+        old_config = {
+            "enabled": self.enabled if hasattr(self, 'enabled') else None,
+            "max_batch_size": self.max_batch_size if hasattr(self, 'max_batch_size') else None,
+            "max_wait_time_ms": self.max_wait_time_ms if hasattr(self, 'max_wait_time_ms') else None
+        }
+        
+        self.batching_config = self.config_manager.get_message_batching_config()
         self.enabled = self.batching_config.get("enabled", True)
         self.batch_window_ms = self.batching_config.get("batch_window_ms", 2000)
-        self.max_batch_size = self.batching_config.get("max_batch_size", 3)
+        self.max_batch_size = self.batching_config.get("max_batch_size", 2)
         self.max_wait_time_ms = self.batching_config.get("max_wait_time_ms", 1500)
         
-        logger.info(f"消息批处理器初始化完成: enabled={self.enabled}, batch_window_ms={self.batch_window_ms}")
+        # 如果配置发生变化，记录日志
+        if (old_config["enabled"] != self.enabled or 
+            old_config["max_batch_size"] != self.max_batch_size or
+            old_config["max_wait_time_ms"] != self.max_wait_time_ms):
+            logger.info(f"批处理配置已更新: enabled={self.enabled}, max_batch_size={self.max_batch_size}, max_wait_time_ms={self.max_wait_time_ms}")
     
     async def add_message(self, message_data: Dict[str, Any], chat_id: str) -> Optional[List[Dict[str, Any]]]:
         """
@@ -75,28 +93,65 @@ class MessageBatcher:
                 self.processing_tasks[chat_id] = asyncio.create_task(
                     self._process_batch_with_timeout(chat_id)
                 )
+                logger.debug(f"创建新批次和超时任务: {chat_id}")
             
             # 添加消息到批次
             batch = self.batches[chat_id]
             batch.add_message(message_data)
+            batch.last_received_time = current_time  # 更新最后接收时间
             
             logger.debug(f"添加消息到批次 {chat_id}, 当前批次大小: {len(batch.messages)}")
             
-            # 检查是否应该立即处理批次
-            if batch.should_process(self.max_batch_size, self.max_wait_time_ms):
-                return await self._process_batch(chat_id)
+            # 检查是否应该立即处理批次（达到最大批次大小）
+            if len(batch.messages) >= self.max_batch_size:
+                logger.debug(f"批次达到最大大小，创建异步处理任务: {chat_id}")
+                # 创建异步处理任务，不等待完成
+                asyncio.create_task(self._process_batch_async(chat_id))
+                return None  # 返回None表示消息已被异步处理，避免重复处理
             
             return None
+    
+    async def _process_batch_async(self, chat_id: str) -> None:
+        """异步处理批次，不阻塞调用方"""
+        try:
+            # 延迟处理以避免与心跳冲突
+            await asyncio.sleep(0.5)
+            await self._process_batch(chat_id)
+        except Exception as e:
+            logger.error(f"异步批次处理失败: {e}")
     
     async def _process_batch_with_timeout(self, chat_id: str) -> None:
         """带超时的批次处理任务"""
         try:
-            # 等待批处理窗口时间
-            await asyncio.sleep(self.max_wait_time_ms / 1000)
-            
-            # 如果批次仍然存在，处理它
-            if chat_id in self.batches:
-                await self._process_batch(chat_id)
+            # 循环检查，直到需要处理批次
+            while True:
+                await asyncio.sleep(0.5)  # 每500ms检查一次
+                
+                # 如果批次不存在或任务被取消，退出
+                if chat_id not in self.batches or chat_id not in self.processing_tasks:
+                    logger.debug(f"批次或任务不存在，退出: {chat_id}")
+                    return
+                
+                batch = self.batches[chat_id]
+                current_time = time.time()
+                wait_time_ms = (current_time - batch.last_received_time) * 1000
+                
+                # 如果等待时间超过阈值，处理批次
+                if wait_time_ms >= self.max_wait_time_ms:
+                    logger.debug(f"批次超时，开始处理: {chat_id}, 等待时间: {wait_time_ms:.1f}ms")
+                    await self._process_batch(chat_id)
+                    return
+                
+                # 如果批次大小达到上限，由add_message异步处理，退出超时任务
+                if len(batch.messages) >= self.max_batch_size:
+                    logger.debug(f"批次达到大小上限，由add_message异步处理，退出超时任务: {chat_id}")
+                    # 清理超时任务，避免重复处理
+                    if chat_id in self.processing_tasks:
+                        task = self.processing_tasks.pop(chat_id)
+                        if not task.done():
+                            task.cancel()
+                    return
+                    
         except asyncio.CancelledError:
             logger.debug(f"批次处理任务被取消: {chat_id}")
         except Exception as e:
@@ -110,7 +165,7 @@ class MessageBatcher:
             
             batch = self.batches.pop(chat_id)
             
-            # 取消处理任务
+            # 清理处理任务
             if chat_id in self.processing_tasks:
                 task = self.processing_tasks.pop(chat_id)
                 if not task.done():
@@ -125,7 +180,46 @@ class MessageBatcher:
         
         logger.info(f"处理消息批次: chat_id={chat_id}, size={batch_size}, processing_time={processing_time_ms:.1f}ms")
         
+        # 如果有消息处理器和WebSocket管理器，则处理消息生成回复
+        if self.message_processor and self.websocket_manager:
+            try:
+                # 创建低优先级后台任务处理批次，确保不阻塞心跳
+                batch_task = asyncio.create_task(
+                    self._process_batch_without_blocking(batch.messages, chat_id)
+                )
+                # 设置低优先级
+                batch_task.add_done_callback(self._handle_batch_task_completion)
+                logger.debug(f"创建低优先级后台处理任务: {chat_id}")
+            except Exception as e:
+                logger.error(f"批次消息处理失败: {e}")
+        
         return batch.messages
+    
+    async def _process_batch_without_blocking(self, messages, chat_id):
+        """非阻塞处理批次消息"""
+        try:
+            logger.debug(f"开始非阻塞处理批次: chat_id={chat_id}, size={len(messages)}")
+            
+            # 使用 asyncio.shield 确保任务不会被意外取消
+            await asyncio.shield(
+                self.message_processor._process_message_batch(messages, self.websocket_manager)
+            )
+            
+            logger.debug(f"非阻塞批次处理完成: chat_id={chat_id}")
+        except asyncio.CancelledError:
+            logger.warning(f"非阻塞批次处理被取消: {chat_id}")
+        except Exception as e:
+            logger.error(f"非阻塞批次处理失败: chat_id={chat_id}, error={e}")
+            # 不要重新抛出异常，避免影响其他任务
+    
+    def _handle_batch_task_completion(self, task):
+        """处理批处理任务完成"""
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            logger.debug("批处理任务被取消")
+        except Exception as e:
+            logger.error(f"批处理任务异常完成: {e}")
     
     def get_batch_stats(self) -> Dict[str, Any]:
         """获取批处理统计信息"""
@@ -146,12 +240,22 @@ class MessageBatcher:
         
         # 处理所有待处理的批次
         for chat_id in list(self.batches.keys()):
+            logger.debug(f"清理时处理批次: {chat_id}")
             await self._process_batch(chat_id)
         
-        # 取消所有处理任务
-        for task in self.processing_tasks.values():
+        # 等待一段时间让后台任务完成
+        logger.debug("等待后台任务完成...")
+        await asyncio.sleep(0.5)
+        
+        # 取消所有仍在运行的处理任务
+        for chat_id, task in list(self.processing_tasks.items()):
             if not task.done():
+                logger.debug(f"取消处理任务: {chat_id}")
                 task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         
         self.batches.clear()
         self.processing_tasks.clear()

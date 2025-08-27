@@ -13,7 +13,7 @@
     }
   },
   "heartbeat": {
-    "interval": 999,
+    "interval": 15,
     "timeout": 5
   },
   "token": {
@@ -25,9 +25,8 @@
     "toggle_keywords": "。",
     "batching": {
       "enabled": true,
-      "batch_window_ms": 2000,
       "max_batch_size": 3,
-      "max_wait_time_ms": 1500
+      "max_wait_time_ms": 3500
     }
   },
   "manual_mode": {

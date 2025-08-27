@@ -126,23 +126,15 @@ class ConfigManager:
 
     def _merge_env_variables(self):
         """合并环境变量到配置中"""
-        # 必需的环境变量
+        # 仅包含敏感信息和环境特定配置的环境变量映射
         env_mappings = {
+            # 敏感信息（必须通过环境变量设置）
             "COOKIES_STR": ["cookies_str"],
             "API_KEY": ["llm", "api_key"],
-            "MODEL_BASE_URL": ["llm", "base_url"],
-            "HEARTBEAT_INTERVAL": ["heartbeat", "interval"],
-            "HEARTBEAT_TIMEOUT": ["heartbeat", "timeout"],
-            "TOKEN_REFRESH_INTERVAL": ["token", "refresh_interval"],
-            "TOKEN_RETRY_INTERVAL": ["token", "retry_interval"],
-            "MESSAGE_EXPIRE_TIME": ["message", "expire_time"],
-            "MANUAL_MODE_TIMEOUT": ["manual_mode", "timeout"],
-            "TOGGLE_KEYWORDS": ["message", "toggle_keywords"],
+            
+            # 环境特定配置（可以覆盖 config.json）
             "LOG_LEVEL": ["logging", "level"],
-            "MODEL_ROUTING_ENABLED": ["llm", "model_routing", "enabled"],
-            "MESSAGE_BATCHING_ENABLED": ["message", "batching", "enabled"],
-            "BATCH_WINDOW_MS": ["message", "batching", "batch_window_ms"],
-            "MAX_BATCH_SIZE": ["message", "batching", "max_batch_size"],
+            "MODEL_BASE_URL": ["llm", "base_url"],
         }
 
         for env_var, config_path in env_mappings.items():

@@ -56,22 +56,51 @@ class HeartbeatManager:
 
     async def heartbeat_loop(self):
         """心跳维护循环"""
+        consecutive_timeouts = 0
+        max_consecutive_timeouts = 3
+        batch_processing_detected = False
+        
         while True:
             try:
                 current_time = time.time()
 
                 # 检查是否需要发送心跳
                 if current_time - self.last_heartbeat_time >= self.heartbeat_interval:
-                    await self.send_heartbeat()
+                    # 使用 asyncio.create_task 确保心跳发送不被阻塞
+                    heartbeat_task = asyncio.create_task(self.send_heartbeat())
+                    try:
+                        await asyncio.wait_for(heartbeat_task, timeout=2.0)
+                        consecutive_timeouts = 0  # 重置超时计数
+                        batch_processing_detected = False  # 重置批处理检测标志
+                    except asyncio.TimeoutError:
+                        consecutive_timeouts += 1
+                        logger.warning(f"心跳发送超时，连续超时次数: {consecutive_timeouts}")
+                        heartbeat_task.cancel()
+                        
+                        # 如果连续超时次数过多，可能是网络问题
+                        if consecutive_timeouts >= max_consecutive_timeouts:
+                            logger.error("连续心跳发送超时，可能网络异常")
+                            break
 
                 # 检查上次心跳响应时间，如果超时则认为连接已断开
-                if (current_time - self.last_heartbeat_response) > (
-                    self.heartbeat_interval + self.heartbeat_timeout
-                ):
-                    logger.warning("心跳响应超时，可能连接已断开")
-                    break
+                response_timeout = self.heartbeat_interval + self.heartbeat_timeout
+                time_since_response = current_time - self.last_heartbeat_response
+                
+                if time_since_response > response_timeout:
+                    if not batch_processing_detected:
+                        logger.warning(f"心跳响应超时，距离上次响应: {time_since_response:.1f}s")
+                        logger.info("检测到可能的批处理干扰，建议优化批处理策略")
+                        batch_processing_detected = True
+                    
+                    # 如果超时时间过长，才重新连接
+                    if time_since_response > response_timeout * 2:
+                        logger.error(f"心跳响应超时过长 ({time_since_response:.1f}s)，重新连接...")
+                        break
 
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)  # 更频繁的检查
+            except asyncio.CancelledError:
+                logger.debug("心跳循环被取消")
+                break
             except Exception as e:
                 logger.error(f"心跳循环出错: {e}")
                 break
@@ -79,8 +108,11 @@ class HeartbeatManager:
     def start(self):
         """启动心跳任务"""
         if not self.heartbeat_task or self.heartbeat_task.done():
+            # 使用更高优先级启动心跳任务
             self.heartbeat_task = asyncio.create_task(self.heartbeat_loop())
-            logger.info("心跳任务已启动")
+            # 设置心跳任务为高优先级
+            self.heartbeat_task.add_done_callback(self._handle_task_completion)
+            logger.info("心跳任务已启动（高优先级）")
 
     def stop(self):
         """停止心跳任务"""
@@ -92,6 +124,15 @@ class HeartbeatManager:
                 logger.info("心跳任务已停止")
             except asyncio.CancelledError:
                 pass
+
+    def _handle_task_completion(self, task):
+        """处理心跳任务完成"""
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            logger.debug("心跳任务被正常取消")
+        except Exception as e:
+            logger.error(f"心跳任务异常完成: {e}")
 
     def initialize_times(self):
         """初始化心跳时间"""

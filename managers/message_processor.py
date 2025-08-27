@@ -27,7 +27,7 @@ class MessageProcessor:
         self.toggle_keywords = config_manager.get("message.toggle_keywords", "。")
         
         # 性能优化组件
-        self.message_batcher = MessageBatcher(config_manager)
+        self.message_batcher = MessageBatcher(config_manager, self, None)
         self.intent_analyzer = IntentAnalyzer(config_manager)
 
     def is_chat_message(self, message):
@@ -184,15 +184,24 @@ class MessageProcessor:
 
             # 获取商品ID和会话ID
             url_info = message["1"]["10"]["reminderUrl"]
-            item_id = (
-                url_info.split("itemId=")[1].split("&")[0]
-                if "itemId=" in url_info
-                else None
-            )
+            item_id = None
+            
+            # 尝试多种方式提取商品ID
+            if "itemId=" in url_info:
+                item_id = url_info.split("itemId=")[1].split("&")[0]
+            elif "item_id=" in url_info:
+                item_id = url_info.split("item_id=")[1].split("&")[0]
+            elif "/item/" in url_info:
+                # 尝试从路径中提取商品ID
+                import re
+                match = re.search(r'/item/(\d+)', url_info)
+                if match:
+                    item_id = match.group(1)
+            
             chat_id = message["1"]["2"].split("@")[0]
 
             if not item_id:
-                logger.warning("无法获取商品ID")
+                logger.debug("无法获取商品ID，跳过此消息")
                 return None
 
             return {
@@ -246,7 +255,8 @@ class MessageProcessor:
         item_info = self.context_manager.get_item_info(item_id)
         if not item_info:
             logger.info(f"从API获取商品信息: {item_id}")
-            api_result = self.xianyu_apis.get_item_info(item_id)
+            # 使用 asyncio.to_thread 在单独的线程中运行阻塞的API调用
+            api_result = await asyncio.to_thread(self.xianyu_apis.get_item_info, item_id)
             if "data" in api_result and "itemDO" in api_result["data"]:
                 item_info = api_result["data"]["itemDO"]
                 # 保存商品信息到数据库
@@ -265,8 +275,10 @@ class MessageProcessor:
             f"{item_info['desc']};当前商品售卖价格为:{str(item_info['soldPrice'])}"
         )
 
-        # 获取完整的对话上下文
-        context = self.context_manager.get_context_by_chat(message_info["chat_id"])
+        # 获取完整的对话上下文（非阻塞）
+        context = await asyncio.to_thread(
+            self.context_manager.get_context_by_chat, message_info["chat_id"]
+        )
         formatted_context = self.bot.format_history(context)
 
         # 分析意图和复杂度
@@ -279,25 +291,29 @@ class MessageProcessor:
         
         logger.info(f"意图分析: intent={intent}, complexity={complexity:.2f}, selected_model={selected_model}")
 
-        # 使用选定的模型生成回复
-        bot_reply = self.bot.generate_reply_with_model(
+        # 使用选定的模型生成回复（在线程中运行以避免阻塞）
+        bot_reply = await asyncio.to_thread(
+            self.bot.generate_reply_with_model,
             message_info["send_message"], item_description, context=context, model_name=selected_model
         )
 
-        # 检查是否为价格意图，如果是则增加议价次数
+        # 检查是否为价格意图，如果是则增加议价次数（非阻塞）
         if self.bot.last_intent == "price":
-            self.context_manager.increment_bargain_count_by_chat(
+            await asyncio.to_thread(
+                self.context_manager.increment_bargain_count_by_chat,
                 message_info["chat_id"]
             )
-            bargain_count = self.context_manager.get_bargain_count_by_chat(
+            bargain_count = await asyncio.to_thread(
+                self.context_manager.get_bargain_count_by_chat,
                 message_info["chat_id"]
             )
             logger.info(
                 f"用户 {message_info['send_user_name']} 对商品 {message_info['item_id']} 的议价次数: {bargain_count}"
             )
 
-        # 添加机器人回复到上下文
-        self.context_manager.add_message_by_chat(
+        # 添加机器人回复到上下文（非阻塞）
+        await asyncio.to_thread(
+            self.context_manager.add_message_by_chat,
             message_info["chat_id"],
             "bot",
             message_info["item_id"],
@@ -358,12 +374,15 @@ class MessageProcessor:
     
     async def _process_message_with_batching(self, message_info, websocket_manager):
         """使用批处理机制处理消息"""
+        # 更新WebSocket管理器引用
+        self.message_batcher.websocket_manager = websocket_manager
+        
         # 将消息信息添加到批处理器
         batch_result = await self.message_batcher.add_message(message_info, message_info["chat_id"])
         
-        # 如果返回None，说明消息被加入批次等待处理
+        # 如果返回None，说明消息被加入批次等待异步处理
         if batch_result is None:
-            logger.debug(f"消息已加入批次等待处理: {message_info['chat_id']}")
+            logger.debug(f"消息已加入批次等待异步处理: {message_info['chat_id']}")
             return
         
         # 如果是单个消息（批处理未启用），直接处理
@@ -381,8 +400,9 @@ class MessageProcessor:
             f"用户: {message_info['send_user_name']} (ID: {message_info['send_user_id']}), 商品: {message_info['item_id']}, 会话: {message_info['chat_id']}, 消息: {message_info['send_message']}"
         )
 
-        # 添加用户消息到上下文
-        self.context_manager.add_message_by_chat(
+        # 添加用户消息到上下文（非阻塞）
+        await asyncio.to_thread(
+            self.context_manager.add_message_by_chat,
             message_info["chat_id"],
             message_info["send_user_id"],
             message_info["item_id"],
@@ -432,15 +452,21 @@ class MessageProcessor:
                 logger.info(f"🔴 会话 {chat_id} 处于人工接管模式，跳过自动回复")
                 continue
             
-            # 添加所有用户消息到上下文
+            # 添加所有用户消息到上下文（并行非阻塞）
+            db_tasks = []
             for msg_info in messages:
-                self.context_manager.add_message_by_chat(
+                task = asyncio.to_thread(
+                    self.context_manager.add_message_by_chat,
                     msg_info["chat_id"],
                     msg_info["send_user_id"],
                     msg_info["item_id"],
                     "user",
                     msg_info["send_message"],
                 )
+                db_tasks.append(task)
+            
+            # 并行执行所有数据库操作
+            await asyncio.gather(*db_tasks)
             
             # 获取商品信息（使用第一条消息的商品信息）
             item_info = await self.get_item_info(messages[0]["item_id"])

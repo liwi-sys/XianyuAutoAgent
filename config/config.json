@@ -26,7 +26,7 @@
     "batching": {
       "enabled": true,
       "max_batch_size": 3,
-      "max_wait_time_ms": 3500
+      "max_wait_time_ms": 1500
     }
   },
   "manual_mode": {
